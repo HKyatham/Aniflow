@@ -2351,6 +2351,8 @@ def scraper_download():
     data = request.json
     manga_url = data.get('url', '').strip()
     chapters = data.get('chapters', [])
+    manga_info = data.get('manga_info')  # Analyze result, so we don't re-fetch it
+    data_saver = bool(data.get('data_saver'))
     if not manga_url or not chapters:
         return jsonify({'error': 'URL and chapters are required'}), 400
     def run():
@@ -2359,7 +2361,8 @@ def scraper_download():
             socketio.emit('progress', {'stage': 'download', 'current': current, 'total': total,
                                        'message': msg, 'percent': int((current / max(total, 1)) * 100)})
         try:
-            result = download_chapters(manga_url, chapters, progress_callback=cb)
+            result = download_chapters(manga_url, chapters, progress_callback=cb,
+                                       manga_info=manga_info, data_saver=data_saver)
             socketio.emit('step_complete', {'step': 'download_chapters', 'project': 'scraper',
                 'stage': 'done', 'error': None, 'result': result})
         except Exception as e:

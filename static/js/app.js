@@ -315,6 +315,7 @@ function renderStepContent() {
 // Scraper state kept across re-renders
 const SCRAPER = {
   mangaInfo: null,       // result from analyze_url
+  analyzedUrl: null,     // the URL mangaInfo came from
   analyzing: false,
   downloading: false,
   downloadedPaths: [],   // [{chapter, path, images}]
@@ -602,6 +603,7 @@ async function analyzeUrl() {
       toast(data.error, 'error');
     } else {
       SCRAPER.mangaInfo = data;
+      SCRAPER.analyzedUrl = url;
       renderAnalyzeResult(data);
       toast(`Found "${data.manga_name}" — ${data.total_chapters} chapters`, 'success');
     }
@@ -632,6 +634,11 @@ function renderAnalyzeResult(data) {
   const firstCh = chapters.length > 0 ? chapters[0].number : 1;
   const lastCh = chapters.length > 0 ? chapters[chapters.length - 1].number : 1;
   const sideStories = chapters.filter(c => c.is_side_story);
+  const dataSaverBox = data.site !== 'mangadex.org' ? '' : `
+          <label style="display:flex; gap:8px; align-items:center; margin-top:10px; font-size:13px; font-weight:600; color:var(--ink); cursor:pointer;">
+            <input type="checkbox" id="chkDataSaver">
+            Compressed images (much faster, lower quality)
+          </label>`;
   const sideStoryBox = sideStories.length === 0 ? '' : `
           <div style="margin-top:10px; padding:10px 12px; background:var(--paper); border:1px solid var(--hairline); border-radius:6px;">
             <label style="display:flex; gap:8px; align-items:center; font-size:13px; font-weight:600; color:var(--ink); cursor:pointer;">
@@ -682,6 +689,7 @@ function renderAnalyzeResult(data) {
             <br>
             <span style="color:var(--text-dim); font-size:11px;">For batch processing: download multiple chapters and process them all at once.</span>
           </div>
+          ${dataSaverBox}
           ${sideStoryBox}
         </div>
       </div>
@@ -734,7 +742,16 @@ async function downloadChapters() {
   const chapters = parseChapterRange(rangeStr, SCRAPER.mangaInfo.chapters, !!(skipEl && skipEl.checked));
   if (chapters.length === 0) return toast('No matching chapters found in that range', 'error');
 
-  const url = document.getElementById('inputMangaUrl').value.trim();
+  // Download from the URL the chapter list came from, even if the input was
+  // edited since, and send the Analyze result so the server doesn't re-fetch it
+  const url = SCRAPER.analyzedUrl || document.getElementById('inputMangaUrl').value.trim();
+  const info = SCRAPER.mangaInfo;
+  const manga_info = {
+    manga_name: info.manga_name, description: info.description,
+    cover_url: info.cover_url, total_chapters: info.total_chapters,
+  };
+  const dsEl = document.getElementById('chkDataSaver');
+  const data_saver = !!(dsEl && dsEl.checked);
   SCRAPER.downloading = true;
 
   const btn = document.getElementById('btnDownload');
@@ -750,7 +767,7 @@ async function downloadChapters() {
     const r = await fetch('/api/scraper/download', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ url, chapters }),
+      body: JSON.stringify({ url, chapters, manga_info, data_saver }),
     });
     const d = await r.json();
     if (d.error) {

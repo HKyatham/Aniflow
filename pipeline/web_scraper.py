@@ -142,18 +142,23 @@ def _mangadex_analyze(url):
             break
 
     # ── Chapter list ────────────────────────────────────────
-    # Try English first, fall back to all available languages
+    # The title details already say which languages exist, so pick the filter
+    # up front: English if available, otherwise every language. 500 chapters
+    # per request (MangaDex's maximum page size). The unfiltered retry only
+    # runs if English is listed but has no numbered chapters (rare).
+    available = attrs.get('availableTranslatedLanguages') or []
+    lang_filters = [['en'], None] if (not available or 'en' in available) else [None]
+
     chapters = []
-    for lang_filter in [['en'], None]:
+    for lang_filter in lang_filters:
         chapters = []
         offset = 0
-        limit = 100
+        limit = 500
         while True:
             params = {
                 'order[chapter]': 'asc',
                 'limit': limit,
                 'offset': offset,
-                'includes[]': ['scanlation_group'],
             }
             if lang_filter:
                 params['translatedLanguage[]'] = lang_filter
@@ -194,7 +199,7 @@ def _mangadex_analyze(url):
             if offset >= total:
                 break
 
-        if chapters:  # Found something — stop trying other language filters
+        if chapters:
             break
 
     # Deduplicate by chapter number (keep first)
@@ -212,8 +217,24 @@ def _mangadex_analyze(url):
     return result
 
 
-def _mangadex_get_chapter_images(chapter_id):
-    """Fetch page image URLs for a MangaDex chapter via the at-home API."""
+# MangaDex limits /at-home/server to 40 requests/minute. Chapters are fetched
+# one at a time, so spacing these calls 1.6s apart keeps us under the limit
+# even when chapters download quickly — without a fixed sleep per chapter.
+_MD_AT_HOME_MIN_INTERVAL = 1.6
+_md_at_home_last = 0.0
+_md_at_home_lock = threading.Lock()
+
+
+def _mangadex_get_chapter_images(chapter_id, data_saver=False):
+    """Fetch page image URLs for a MangaDex chapter via the at-home API.
+    data_saver=True returns MangaDex's compressed pages (much smaller and
+    faster, lower quality); default is the full-quality originals."""
+    global _md_at_home_last
+    with _md_at_home_lock:
+        wait = _MD_AT_HOME_MIN_INTERVAL - (time.monotonic() - _md_at_home_last)
+        if wait > 0:
+            time.sleep(wait)
+        _md_at_home_last = time.monotonic()
     try:
         body = _md_get_json(f"/at-home/server/{chapter_id}")
     except Exception as e:
@@ -223,8 +244,9 @@ def _mangadex_get_chapter_images(chapter_id):
     base_url = body.get('baseUrl', '')
     ch_data = body.get('chapter', {})
     hash_ = ch_data.get('hash', '')
-    pages = ch_data.get('data', [])  # lossless; use dataSaver for compressed
-    return [f"{base_url}/data/{hash_}/{page}" for page in pages]
+    if data_saver and ch_data.get('dataSaver'):
+        return [f"{base_url}/data-saver/{hash_}/{page}" for page in ch_data['dataSaver']]
+    return [f"{base_url}/data/{hash_}/{page}" for page in ch_data.get('data', [])]
 
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
@@ -915,7 +937,8 @@ def _download_image(img_url, save_path, referer):
         return False
 
 
-def download_chapters(manga_url, chapters, progress_callback=None):
+def download_chapters(manga_url, chapters, progress_callback=None,
+                      manga_info=None, data_saver=False):
     """
     Download selected chapters into organized folder structure.
     
@@ -926,6 +949,11 @@ def download_chapters(manga_url, chapters, progress_callback=None):
         manga_url: The manga index URL
         chapters: List of chapter dicts with 'number' and 'url'
         progress_callback: Optional callback(current, total, message)
+        manga_info: The analyze_url() result the UI already has (name,
+            description, cover_url, total_chapters). Passing it skips
+            re-fetching the whole chapter list before downloading.
+        data_saver: MangaDex only — download compressed pages (faster,
+            lower quality) instead of full-quality originals.
 
     Returns: {
         'manga_name': str,
@@ -935,7 +963,12 @@ def download_chapters(manga_url, chapters, progress_callback=None):
         'total_images': int
     }
     """
-    info = analyze_url(manga_url)
+    # Reuse the Analyze result when the UI sends it; only re-analyze if not
+    info = manga_info if (manga_info and manga_info.get('manga_name')) else analyze_url(manga_url)
+    info = {'manga_name': info.get('manga_name') or '',
+            'description': info.get('description') or '',
+            'cover_url': info.get('cover_url'),
+            'total_chapters': info.get('total_chapters') or 0}
     manga_name_raw = info['manga_name'] or _extract_manga_slug(manga_url).replace('-', ' ').title()
     
     # Sanitize manhwa name for folder paths (spaces to hyphens, remove special chars)
@@ -974,7 +1007,7 @@ def download_chapters(manga_url, chapters, progress_callback=None):
         # MangaDex chapters have a stored chapter ID — use the API
         md_id = ch.get('_md_chapter_id')
         if md_id:
-            images = _mangadex_get_chapter_images(md_id)
+            images = _mangadex_get_chapter_images(md_id, data_saver=data_saver)
             referer = "https://mangadex.org/"
         else:
             images = _get_chapter_images(ch_url, manga_url)
@@ -986,7 +1019,7 @@ def download_chapters(manga_url, chapters, progress_callback=None):
 
         # ✅ RELIABILITY: resume + parallel + retry.
         # 1. Skip images already on disk (a stalled/interrupted download resumes)
-        # 2. Fetch the remaining pages with a small thread pool (4-5 concurrent)
+        # 2. Fetch the remaining pages with a small thread pool (8 for MangaDex, 5 for other sites)
         # 3. Every page gets _download_image_with_retry (3 retries w/ backoff)
         img_jobs = []
         for i, img_url in enumerate(images):
@@ -1004,7 +1037,9 @@ def download_chapters(manga_url, chapters, progress_callback=None):
                               f"Chapter {ch_num}: fetching {len(img_jobs)} pages…")
 
         if img_jobs:
-            max_workers = min(5, len(img_jobs))
+            # MangaDex@Home image servers handle 8 parallel fetches fine;
+            # keep scraped (often Cloudflare-protected) sites at 5.
+            max_workers = min(8 if md_id else 5, len(img_jobs))
             with ThreadPoolExecutor(max_workers=max_workers) as pool:
                 futures = {pool.submit(_download_image_with_retry, url, sp, referer): sp
                            for (url, sp) in img_jobs}
@@ -1027,8 +1062,10 @@ def download_chapters(manga_url, chapters, progress_callback=None):
         })
         result['total_images'] += downloaded
 
-        # Delay between chapters
-        time.sleep(0.5)
+        # Brief pause between chapters for scraped sites. MangaDex needs none:
+        # its rate-limited call is paced in _mangadex_get_chapter_images.
+        if not md_id:
+            time.sleep(0.5)
 
     # Save metadata
     meta_path = os.path.join(manga_dir, "manga_info.json")
