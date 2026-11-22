@@ -26,7 +26,7 @@ import re
 import requests
 from pathlib import Path
 import config
-from pipeline.llm_transport import raise_for_llm_status
+from pipeline.llm_transport import ollama_post
 
 log = logging.getLogger("pipeline.text_extractor")
 
@@ -315,9 +315,9 @@ def _extract_text_and_description(image_path: str, vision_model: str,
     )
 
     try:
-        resp = requests.post(
+        data = ollama_post(
             f"{host}/api/generate",
-            json=_fast_json({
+            _fast_json({
                 "model": vision_model,
                 "prompt": prompt,
                 "images": [image_b64],
@@ -327,10 +327,9 @@ def _extract_text_and_description(image_path: str, vision_model: str,
                     "num_predict": 400,
                 }
             }),
-            timeout=config.OLLAMA_TIMEOUT
+            config.OLLAMA_TIMEOUT,
         )
-        raise_for_llm_status(resp)
-        raw = resp.json().get('response', '').strip()
+        raw = data.get('response', '').strip()
         return _parse_vision_response(raw)
 
     except requests.exceptions.ConnectionError:

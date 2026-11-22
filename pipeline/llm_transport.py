@@ -38,6 +38,72 @@ def raise_for_llm_status(resp):
     raise requests.HTTPError(msg, response=resp)
 
 
+# ── GPU → CPU fallback for vision models ─────────────────────────
+# On some GPU setups Ollama runs a vision model's image path incorrectly:
+# qwen2.5vl answers any image with "@@@@@@…" until Ollama aborts with
+# "token repeat limit reached" (the 500s seen in the pipeline), while the
+# same model on CPU reads the image fine. When that happens we switch the
+# model to CPU (num_gpu=0) for the rest of the session and retry.
+# Force it up front with OLLAMA_CPU_MODELS="qwen2.5vl:3b,other:tag".
+_cpu_only_models = {m.strip() for m in
+                    getattr(config, "OLLAMA_CPU_MODELS", "").split(",") if m.strip()}
+
+
+def _has_images(payload: dict) -> bool:
+    if payload.get("images"):
+        return True
+    return any(m.get("images") for m in payload.get("messages") or [])
+
+
+def _reply_text(data: dict) -> str:
+    return (data.get("response") or (data.get("message") or {}).get("content") or "").strip()
+
+
+def _is_gpu_garbage(text: str = "", error: str = "") -> bool:
+    if "token repeat limit" in error:
+        return True
+    return len(text) >= 3 and set(text) == {"@"}
+
+
+def ollama_post(url: str, payload: dict, timeout, headers: dict | None = None) -> dict:
+    """POST to an Ollama /api/generate or /api/chat endpoint and return its JSON,
+    retrying once on CPU if the GPU produced vision garbage."""
+    model = payload.get("model", "")
+    for attempt in (0, 1):
+        body = payload
+        req_timeout = timeout
+        if model in _cpu_only_models:
+            body = {**payload, "options": {**(payload.get("options") or {}), "num_gpu": 0}}
+            # CPU inference is several times slower than GPU
+            req_timeout = max(timeout or 0, getattr(config, "OLLAMA_TIMEOUT", 180))
+        resp = requests.post(url, json=body, headers=headers, timeout=req_timeout)
+        garbage = False
+        if resp.status_code >= 400:
+            try:
+                err = str((resp.json() or {}).get("error", ""))
+            except ValueError:
+                err = resp.text or ""
+            garbage = _is_gpu_garbage(error=err)
+            if not garbage:
+                raise_for_llm_status(resp)
+            data = {}
+        else:
+            data = resp.json()
+            garbage = _is_gpu_garbage(text=_reply_text(data))
+        if not garbage:
+            return data
+        if attempt == 1 or model in _cpu_only_models or not _has_images(payload):
+            if resp.status_code >= 400:
+                raise_for_llm_status(resp)
+            return data
+        _cpu_only_models.add(model)
+        print(f"[LLM] ⚠️ {model} returned garbage for an image on the GPU "
+              f"(a known Ollama GPU issue). Running {model} on CPU from now on — "
+              f"slower, but it reads images correctly. Set OLLAMA_CPU_MODELS={model} "
+              f"to skip this first failed attempt.")
+    return data
+
+
 def _as_data_url(image, default_media_type: str = "image/jpeg") -> str:
     """Accept bare base64, a ``(b64, media_type)`` pair, or an existing URL."""
     media_type = default_media_type
@@ -135,7 +201,7 @@ class OllamaTransport(BaseTransport):
         }
         if keep_alive:
             payload["keep_alive"] = keep_alive
-        data = self._post(f"{self.host}/api/chat", payload, self.headers, timeout)
+        data = ollama_post(f"{self.host}/api/chat", payload, timeout, self.headers)
         return (data.get("message") or {}).get("content", "").strip()
 
     def generate(self, model: str, prompt: str, images: list | None = None, *,
@@ -153,7 +219,7 @@ class OllamaTransport(BaseTransport):
             payload["images"] = [_as_base64(img) for img in images]
         if keep_alive:
             payload["keep_alive"] = keep_alive
-        data = self._post(f"{self.host}/api/generate", payload, self.headers, timeout)
+        data = ollama_post(f"{self.host}/api/generate", payload, timeout, self.headers)
         return data.get("response", "").strip()
 
     def list_models(self) -> list[str]:

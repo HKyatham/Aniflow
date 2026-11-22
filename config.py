@@ -112,6 +112,10 @@ WRITER_MODEL  = os.getenv("WRITER_MODEL", "qwen2.5vl:3b") # Step 2 — The Write
 TEXT_WRITER_MODEL = os.getenv("TEXT_WRITER_MODEL", "gemma3:27b")
 DECOUPLED_NARRATION = True         # True = Vision Parser → Text Storyteller (recommended)
 OLLAMA_TIMEOUT = 180  # seconds per panel
+# Models to run on CPU (num_gpu=0), comma-separated. Use when a vision model
+# returns "@@@@" / "token repeat limit reached" on your GPU. The app also
+# switches automatically after the first such failure.
+OLLAMA_CPU_MODELS = os.getenv("OLLAMA_CPU_MODELS", "")
 LLM_IMAGE_MAX_SIDE = int(os.getenv("LLM_IMAGE_MAX_SIDE", "1400"))
 # Text extraction caps total pixels instead, so tall panels stay readable
 LLM_OCR_MAX_PIXELS = int(os.getenv("LLM_OCR_MAX_PIXELS", "1000000"))

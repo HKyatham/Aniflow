@@ -29,7 +29,7 @@ import requests
 from typing import Optional
 
 import config
-from pipeline.llm_transport import raise_for_llm_status
+from pipeline.llm_transport import ollama_post
 
 # ─── Strings that always mean SKIP (case-insensitive substring match) ──────────
 _SKIP_KEYWORDS = [
@@ -253,9 +253,9 @@ def _ai_classify(img: np.ndarray, host: str) -> tuple[bool, str]:
     image_b64 = base64.b64encode(buf.tobytes()).decode("utf-8")
 
     try:
-        resp = requests.post(
+        data = ollama_post(
             f"{host}/api/generate",
-            json={
+            {
                 "model": config.VISION_MODEL,  # qwen2.5vl:3b
                 "prompt": _CLASSIFY_PROMPT,
                 "images": [image_b64],
@@ -266,10 +266,9 @@ def _ai_classify(img: np.ndarray, host: str) -> tuple[bool, str]:
                     "top_p": 1.0,
                 },
             },
-            timeout=30,  # short timeout — this is just classification
+            30,  # short timeout — this is just classification (raised on CPU)
         )
-        raise_for_llm_status(resp)
-        answer = resp.json().get("response", "").strip().upper()
+        answer = data.get("response", "").strip().upper()
 
         # Parse the answer — look for SKIP anywhere in the response
         if "SKIP" in answer:
