@@ -14,6 +14,30 @@ import config
 DEFAULT_TIMEOUT = getattr(config, "OLLAMA_TIMEOUT", 120)
 
 
+def raise_for_llm_status(resp):
+    """Like resp.raise_for_status(), but keeps the server's own error message.
+
+    Ollama answers failures with a JSON body such as
+    {"error": "model requires more system memory (9.6 GiB) than is available"};
+    plain raise_for_status() drops it and leaves only "500 Server Error".
+    """
+    if resp.status_code < 400:
+        return
+    detail = ""
+    try:
+        body = resp.json()
+        err = body.get("error") if isinstance(body, dict) else None
+        if isinstance(err, dict):  # OpenAI-style {"error": {"message": ...}}
+            err = err.get("message")
+        detail = str(err or "")
+    except ValueError:
+        detail = (resp.text or "").strip()[:300]
+    msg = f"{resp.status_code} {resp.reason} from {resp.url}"
+    if detail:
+        msg += f" — {detail}"
+    raise requests.HTTPError(msg, response=resp)
+
+
 def _as_data_url(image, default_media_type: str = "image/jpeg") -> str:
     """Accept bare base64, a ``(b64, media_type)`` pair, or an existing URL."""
     media_type = default_media_type
@@ -52,13 +76,13 @@ class BaseTransport:
     @staticmethod
     def _post(url: str, payload: dict, headers: dict, timeout):
         resp = requests.post(url, json=payload, headers=headers, timeout=timeout)
-        resp.raise_for_status()
+        raise_for_llm_status(resp)
         return resp.json()
 
     @staticmethod
     def _get(url: str, headers: dict, timeout):
         resp = requests.get(url, headers=headers, timeout=timeout)
-        resp.raise_for_status()
+        raise_for_llm_status(resp)
         return resp.json()
 
     def chat(self, **kwargs) -> str:

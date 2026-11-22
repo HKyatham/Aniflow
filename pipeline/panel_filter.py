@@ -29,6 +29,7 @@ import requests
 from typing import Optional
 
 import config
+from pipeline.llm_transport import raise_for_llm_status
 
 # ─── Strings that always mean SKIP (case-insensitive substring match) ──────────
 _SKIP_KEYWORDS = [
@@ -267,7 +268,7 @@ def _ai_classify(img: np.ndarray, host: str) -> tuple[bool, str]:
             },
             timeout=30,  # short timeout — this is just classification
         )
-        resp.raise_for_status()
+        raise_for_llm_status(resp)
         answer = resp.json().get("response", "").strip().upper()
 
         # Parse the answer — look for SKIP anywhere in the response

@@ -26,6 +26,7 @@ import re
 import requests
 from pathlib import Path
 import config
+from pipeline.llm_transport import raise_for_llm_status
 
 log = logging.getLogger("pipeline.text_extractor")
 
@@ -307,7 +308,7 @@ def _extract_text_and_description(image_path: str, vision_model: str,
             }),
             timeout=config.OLLAMA_TIMEOUT
         )
-        resp.raise_for_status()
+        raise_for_llm_status(resp)
         raw = resp.json().get('response', '').strip()
         return _parse_vision_response(raw)
 

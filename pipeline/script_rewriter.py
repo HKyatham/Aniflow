@@ -4,6 +4,7 @@ Supports multiple styles: dramatic, casual, epic, horror, comedy, hype.
 """
 import requests
 import config
+from pipeline.llm_transport import raise_for_llm_status
 
 
 class ScriptRewriter:
@@ -70,7 +71,7 @@ Rewrite the narration in the specified style:"""
                 json=payload,
                 timeout=config.OLLAMA_TIMEOUT
             )
-            resp.raise_for_status()
+            raise_for_llm_status(resp)
             data = resp.json()
             result = data.get('response', '').strip()
 

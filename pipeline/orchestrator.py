@@ -2596,6 +2596,21 @@ class Orchestrator:
                 text_field = 'text'
             panels_for_audio = state.panels_with_text if state.panels_with_text and text_field == 'text' else state.panels
 
+        # Stop here if the earlier AI step failed for every panel: voicing
+        # "[Error: ...]" placeholders would only produce a chapter of silent
+        # 2-second clips with no hint of what went wrong.
+        texts = [(p.get(text_field) or '').strip() for p in (panels_for_audio or [])]
+        meaningful = [t for t in texts if t and t != '(no dialogue)']
+        failed = [t for t in meaningful if t.startswith('[')]
+        if meaningful and len(failed) == len(meaningful):
+            state.error = (
+                f"All {len(failed)} panels failed in the earlier "
+                f"{'narration' if text_field == 'narration' else 'text extraction'} step, "
+                f"so there is nothing to voice. First error: {failed[0]} — "
+                f"fix the AI model (Ollama) and re-run that step.")
+            state.save()
+            return state
+
         self._emit_progress('tts', 0, len(panels_for_audio), "Starting TTS generation...")
         try:
             panels = generate_all_audio(panels_for_audio, state,
