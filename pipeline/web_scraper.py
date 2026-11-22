@@ -31,6 +31,34 @@ MANGADEX_API = "https://api.mangadex.org"
 MANGADEX_COVERS = "https://uploads.mangadex.org/covers"
 MANGADEX_DOMAIN = "mangadex.org"
 
+# MangaDex's API policy forbids spoofed browser User-Agents and blocks
+# requests that look like a fake browser (returning an HTML/empty body instead
+# of JSON). So the API gets its own plain session with an honest UA, separate
+# from the browser-impersonating scraper session used for other sites.
+_md_session = requests.Session()
+_md_session.headers.update({
+    "User-Agent": "Aniflow/1.0 (manhwa recap tool)",
+    "Accept": "application/json",
+})
+
+
+def _md_get_json(path, params=None):
+    """GET a MangaDex API endpoint and return parsed JSON.
+    Raises a readable error when the response isn't JSON (e.g. a block page)."""
+    r = _md_session.get(f"{MANGADEX_API}{path}", params=params, timeout=15)
+    try:
+        body = r.json()
+    except ValueError:
+        snippet = (r.text or '').strip().replace('\n', ' ')[:150] or '<empty body>'
+        raise RuntimeError(
+            f"HTTP {r.status_code}, non-JSON response "
+            f"({r.headers.get('Content-Type', 'unknown type')}): {snippet}")
+    if r.status_code >= 400:
+        errs = body.get('errors') or []
+        detail = '; '.join(e.get('detail') or e.get('title', '') for e in errs)
+        raise RuntimeError(f"HTTP {r.status_code}: {detail or r.reason}")
+    return body
+
 
 def _is_mangadex_url(url):
     """Return True if the URL is a MangaDex manga or chapter URL."""
@@ -59,11 +87,9 @@ def _mangadex_analyze(url):
 
     # ── Manga metadata ──────────────────────────────────────
     try:
-        r = _session.get(f"{MANGADEX_API}/manga/{manga_id}",
-                         params={'includes[]': ['cover_art', 'author']},
-                         timeout=15)
-        r.raise_for_status()
-        data = r.json().get('data', {})
+        data = _md_get_json(f"/manga/{manga_id}",
+                            params={'includes[]': ['cover_art', 'author']}
+                            ).get('data', {})
     except Exception as e:
         result['error'] = f"MangaDex API error: {e}"
         return result
@@ -103,10 +129,7 @@ def _mangadex_analyze(url):
             if lang_filter:
                 params['translatedLanguage[]'] = lang_filter
             try:
-                r = _session.get(f"{MANGADEX_API}/manga/{manga_id}/feed",
-                                 params=params, timeout=15)
-                r.raise_for_status()
-                body = r.json()
+                body = _md_get_json(f"/manga/{manga_id}/feed", params=params)
             except Exception as e:
                 result['error'] = f"MangaDex chapter feed error: {e}"
                 break
@@ -162,9 +185,7 @@ def _mangadex_analyze(url):
 def _mangadex_get_chapter_images(chapter_id):
     """Fetch page image URLs for a MangaDex chapter via the at-home API."""
     try:
-        r = _session.get(f"{MANGADEX_API}/at-home/server/{chapter_id}", timeout=15)
-        r.raise_for_status()
-        body = r.json()
+        body = _md_get_json(f"/at-home/server/{chapter_id}")
     except Exception as e:
         print(f"[MangaDex] at-home API error for {chapter_id}: {e}")
         return []
