@@ -2,7 +2,7 @@
 AniFlow - Automated Manhwa Video Creation
 Full-featured Flask app with all pipeline controls.
 """
-import os, json, threading, shutil, re, sys
+import os, json, threading, shutil, re, sys, time
 
 # Line-buffer stdout/stderr so redirected logs (server.log) update live
 try:
@@ -209,6 +209,7 @@ def switch_chapter():
         
         state.switch_to_chapter(chapter_num)
         state.save()
+        _invalidate_clip_dirs()
         
         # Return full chapter state so frontend can update UI
         return jsonify({
@@ -1976,22 +1977,45 @@ def get_clips(project_name):
         import traceback
         return jsonify({'error': str(e), 'traceback': traceback.format_exc()}), 500
 
+# The review page requests ~20 clips at once. A full PipelineState.load()
+# per request can also write state.json, and on Windows concurrent
+# reads/writes of that file fail, so some clips returned 500. Resolve the
+# clip folders once per project (under a lock) and reuse them for a few
+# seconds; switching chapters clears the cache.
+_clip_dirs_cache = {}
+_clip_dirs_lock = threading.Lock()
+_CLIP_DIRS_TTL = 15  # seconds
+
+
+def _clip_dirs_for(project_name):
+    now = time.monotonic()
+    with _clip_dirs_lock:
+        hit = _clip_dirs_cache.get(project_name)
+        if hit and now - hit[0] < _CLIP_DIRS_TTL:
+            return hit[1]
+        state = PipelineState.load(project_name)
+        dirs = [state.clips_dir,
+                os.path.join(state.project_dir, 'clips'),
+                os.path.join(config.OUTPUT_DIR, project_name, 'clips')]
+        _clip_dirs_cache[project_name] = (now, dirs)
+        return dirs
+
+
+def _invalidate_clip_dirs(project_name=None):
+    with _clip_dirs_lock:
+        if project_name is None:
+            _clip_dirs_cache.clear()
+        else:
+            _clip_dirs_cache.pop(project_name, None)
+
+
 @app.route('/api/clips/<project_name>/<clip_filename>')
 def serve_clip(project_name, clip_filename):
     """Serve an individual clip file"""
     try:
-        state = PipelineState.load(project_name)
-        
-        # Use the new organized structure
-        clip_path = os.path.join(state.clips_dir, clip_filename)
-        if os.path.exists(clip_path):
-            return send_file(clip_path, mimetype='video/mp4')
-        
-        # Fallback to old structure
-        possible_dirs = [
-            os.path.join(state.project_dir, 'clips'),
-            os.path.join(config.OUTPUT_DIR, project_name, 'clips')
-        ]
+        if os.path.basename(clip_filename) != clip_filename or not clip_filename.endswith('.mp4'):
+            return jsonify({'error': 'Invalid clip name'}), 400
+        possible_dirs = _clip_dirs_for(project_name)
         
         for clips_dir in possible_dirs:
             clip_path = os.path.join(clips_dir, clip_filename)
@@ -2000,6 +2024,9 @@ def serve_clip(project_name, clip_filename):
         
         return jsonify({'error': 'Clip not found'}), 404
     except Exception as e:
+        import traceback
+        print(f"[serve_clip] {project_name}/{clip_filename} failed: {e}")
+        traceback.print_exc()
         return jsonify({'error': str(e)}), 500
 
 # ─── Sort Clips ──────────────────────────────────────────────────

@@ -113,6 +113,8 @@ TEXT_WRITER_MODEL = os.getenv("TEXT_WRITER_MODEL", "gemma3:27b")
 DECOUPLED_NARRATION = True         # True = Vision Parser → Text Storyteller (recommended)
 OLLAMA_TIMEOUT = 180  # seconds per panel
 LLM_IMAGE_MAX_SIDE = int(os.getenv("LLM_IMAGE_MAX_SIDE", "1400"))
+# Text extraction caps total pixels instead, so tall panels stay readable
+LLM_OCR_MAX_PIXELS = int(os.getenv("LLM_OCR_MAX_PIXELS", "1000000"))
 
 # ─── Narration Prompt ─────────────────────────────────────────────
 NARRATION_SYSTEM_PROMPT = """You are a professional manhwa/webtoon narrator creating dramatic recap narrations.

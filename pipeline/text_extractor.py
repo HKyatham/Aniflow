@@ -250,6 +250,28 @@ def _assign_magi_text_to_panels(panels: list[dict], text_file: str):
 # Step 1: Vision model — extract text + describe scene
 # ═══════════════════════════════════════════════════════════════════
 
+def _encode_for_vision(image_path: str) -> str:
+    """JPEG/base64 for the vision model, shrunk to at most
+    LLM_OCR_MAX_PIXELS (~1 MP, Qwen2.5-VL's own default limit).
+
+    Full-resolution panels — tall manhwa crops can be 4-8 MP — explode into
+    thousands of image tokens and make Ollama fail with a 500 on machines
+    with limited RAM/VRAM. Capping total pixels (not the longest side) keeps
+    speech-bubble text legible on tall panels."""
+    from PIL import Image
+    import io
+    max_px = getattr(config, 'LLM_OCR_MAX_PIXELS', 1_000_000)
+    with Image.open(image_path) as img:
+        img = img.convert("RGB")
+        w, h = img.size
+        if w * h > max_px:
+            scale = (max_px / (w * h)) ** 0.5
+            img = img.resize((max(1, int(w * scale)), max(1, int(h * scale))), Image.LANCZOS)
+        buf = io.BytesIO()
+        img.save(buf, format="JPEG", quality=90)
+    return base64.b64encode(buf.getvalue()).decode('utf-8')
+
+
 def _extract_text_and_description(image_path: str, vision_model: str,
                                   host: str, engine: str = "qwen") -> tuple[str, str]:
     """
@@ -262,8 +284,7 @@ def _extract_text_and_description(image_path: str, vision_model: str,
     if engine == "manga-ocr":
         return _manga_ocr(image_path), ""
 
-    with open(image_path, 'rb') as f:
-        image_b64 = base64.b64encode(f.read()).decode('utf-8')
+    image_b64 = _encode_for_vision(image_path)
 
     prompt = (
         "TASK: Extract ONLY English dialogue and narration from this manhwa panel.\n\n"
