@@ -60,6 +60,35 @@ def _md_get_json(path, params=None):
     return body
 
 
+# Words in a chapter title that mark it as a side story / break, not main plot
+_SIDE_STORY_TITLE_RE = re.compile(
+    r'\b(side[\s-]?stor(?:y|ies)|extras?|specials?|bonus|omake|notice|hiatus|'
+    r'announcement|break|afterword|q\s?&\s?a|illustrations?)\b', re.IGNORECASE)
+
+
+def _flag_side_stories(chapters):
+    """Mark likely side stories in-place with 'is_side_story' and
+    'side_story_reason' so the UI can offer to skip them.
+
+    A chapter is flagged when:
+      - it's a decimal (23.5) AND the whole chapter (23) also exists — split
+        chapters like 50.1/50.2 with no plain 50 are main story, so kept; or
+      - its title says side story / extra / special / bonus / notice / etc.
+    """
+    whole = {c['number'] for c in chapters if isinstance(c['number'], int)}
+    for c in chapters:
+        n = c['number']
+        reason = ''
+        m = _SIDE_STORY_TITLE_RE.search(c.get('chapter_title') or '')
+        if m:
+            reason = f'title mentions "{m.group(0)}"'
+        elif isinstance(n, float) and int(n) in whole:
+            reason = f'decimal chapter between {int(n)} and {int(n) + 1}'
+        c['is_side_story'] = bool(reason)
+        c['side_story_reason'] = reason
+    return chapters
+
+
 def _is_mangadex_url(url):
     """Return True if the URL is a MangaDex manga or chapter URL."""
     return MANGADEX_DOMAIN in urlparse(url).netloc
@@ -154,6 +183,7 @@ def _mangadex_analyze(url):
                 chapters.append({
                     'number': ch_num,
                     'title': f"Chapter {ch_num}",
+                    'chapter_title': (ch_attrs.get('title') or '').strip(),
                     'url': f"https://mangadex.org/chapter/{ch['id']}",
                     'date': pub_date,
                     '_md_chapter_id': ch['id'],  # internal: used by downloader
@@ -175,7 +205,7 @@ def _mangadex_analyze(url):
             seen.add(ch['number'])
             unique.append(ch)
 
-    result['chapters'] = unique
+    result['chapters'] = _flag_side_stories(unique)
     result['total_chapters'] = len(unique)
     if not unique:
         result['error'] = "No chapters found on MangaDex for this title."
@@ -650,6 +680,7 @@ def analyze_url(url, _depth=0):
         chapters.append({
             'number': ch_num,
             'title': f"Chapter {ch_num}",
+            'chapter_title': ch_text,
             'url': urljoin(url, href),
             'date': date_str
         })
@@ -664,7 +695,7 @@ def analyze_url(url, _depth=0):
 
     # Sort by chapter number
     unique_chapters.sort(key=lambda c: c['number'])
-    result['chapters'] = unique_chapters
+    result['chapters'] = _flag_side_stories(unique_chapters)
     result['total_chapters'] = len(unique_chapters)
 
     if not unique_chapters:
@@ -889,6 +920,7 @@ def download_chapters(manga_url, chapters, progress_callback=None):
     Download selected chapters into organized folder structure.
     
     New structure: manhwa_download/{sanitized_manga_name}/Chapter_{num:05d}/
+    (side stories: Chapter_00023.5/)
 
     Args:
         manga_url: The manga index URL
@@ -925,13 +957,14 @@ def download_chapters(manga_url, chapters, progress_callback=None):
         ch_num = ch['number']
         ch_url = ch['url']
         
-        # Use 5-digit chapter numbering (supports 99,999 chapters)
+        # 5-digit numbering; side stories keep their decimal so 23.5 gets its
+        # own folder (Chapter_00023.5) instead of mixing into Chapter_00023
         try:
-            chapter_int = int(float(ch_num))  # Handle "23.5" as 23
-        except:
+            chapter_int = config.normalize_chapter_num(ch_num)
+        except (TypeError, ValueError):
             chapter_int = idx + 1  # Fallback to index
-        
-        ch_dir = os.path.join(manga_dir, f"Chapter_{chapter_int:05d}")
+
+        ch_dir = os.path.join(manga_dir, config.chapter_folder_name(chapter_int))
         os.makedirs(ch_dir, exist_ok=True)
 
         if progress_callback:

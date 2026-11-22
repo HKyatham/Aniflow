@@ -9,6 +9,7 @@ import uuid
 import re
 from PIL import Image, ImageFilter
 from datetime import datetime
+import config
 
 CAST_DATA_DIR = os.path.expanduser("~/RECAP/Cast Data")
 
@@ -34,11 +35,10 @@ def scan_faces(manga_path, chapter_from, chapter_to, session_id=None, max_per_im
         ch_dir = os.path.join(manga_path, ch_name)
         if not os.path.isdir(ch_dir) or not ch_name.startswith('Chapter'):
             continue
-        num_match = re.search(r'(\d+)', ch_name)
-        if not num_match:
+        ch_num = config.parse_chapter_num(ch_name)
+        if ch_num is None:
             continue
-        ch_num = int(num_match.group(1))
-        if ch_num < chapter_from or ch_num > chapter_to:
+        if ch_num < float(chapter_from) or ch_num > float(chapter_to):
             continue
         for img_name in sorted(os.listdir(ch_dir)):
             if img_name.lower().endswith(('.jpg', '.jpeg', '.png', '.webp', '.gif')):

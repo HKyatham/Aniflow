@@ -3,6 +3,7 @@ Configuration settings for Manhwa Auto Recap Maker
 Full-featured local pipeline for manhwa/webtoon recap videos.
 """
 import os
+import re
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
@@ -262,6 +263,52 @@ REWRITER_STYLES = {
 
 # ─── Path Helper Functions ───────────────────────────────────────
 
+# Chapter numbers are ints for whole chapters (23) and floats for side
+# stories / split parts (23.5). Folders: Chapter_00023, Chapter_00023.5
+_CHAPTER_TAG_RE = re.compile(r'Chapter_(\d+(?:\.\d+)?)')
+CHAPTER_DIR_RE = re.compile(r'^Chapter_\d{5}(?:\.\d+)?$')
+
+
+def normalize_chapter_num(num):
+    """23, 23.0, "23", "00023" -> 23 ; 23.5, "23.50" -> 23.5"""
+    n = float(num)
+    if n == int(n):
+        return int(n)
+    return round(n, 3)
+
+
+def chapter_num_str(num) -> str:
+    """Zero-padded chapter number: 23 -> "00023", 23.5 -> "00023.5"."""
+    n = normalize_chapter_num(num)
+    if isinstance(n, int):
+        return f"{n:05d}"
+    whole, frac = f"{n:.3f}".rstrip('0').split('.')
+    return f"{int(whole):05d}.{frac}"
+
+
+def chapter_folder_name(num) -> str:
+    """23 -> "Chapter_00023", 23.5 -> "Chapter_00023.5"."""
+    return f"Chapter_{chapter_num_str(num)}"
+
+
+def parse_chapter_num(name):
+    """Extract the chapter number from a folder name or path
+    ("Chapter_00023.5" -> 23.5). Returns None if there isn't one."""
+    m = _CHAPTER_TAG_RE.search(str(name))
+    return normalize_chapter_num(m.group(1)) if m else None
+
+
+def is_chapter_dir_name(name: str) -> bool:
+    return bool(CHAPTER_DIR_RE.match(name))
+
+
+def path_in_chapter(path: str, num) -> bool:
+    """True if `path` lives inside this chapter's folder. Compares whole path
+    components, so Chapter_00023 does not match Chapter_00023.5/..."""
+    tag = chapter_folder_name(num)
+    return tag in str(path).replace('\\', '/').split('/')
+
+
 def get_manhwa_paths(manhwa_name: str, chapter_num: int) -> dict:
     """
     Get all paths for a manhwa chapter in the new organized structure.
@@ -283,7 +330,7 @@ def get_manhwa_paths(manhwa_name: str, chapter_num: int) -> dict:
             'state': 'manhwa_download/Sword-Devouring-Swordmaster/Chapter_00001/state.json'
         }
     """
-    chapter_folder = f"Chapter_{chapter_num:05d}"  # 5 digits for 1000+ chapter support
+    chapter_folder = chapter_folder_name(chapter_num)  # 5 digits; side stories: Chapter_00023.5
     
     paths = {
         'download': os.path.join(MANHWA_DOWNLOAD_DIR, manhwa_name, chapter_folder),
@@ -320,9 +367,9 @@ def get_batch_project_name(manhwa_name: str, start_chapter: int, end_chapter: in
         → "One-Piece__Chapters_00001-01500"
     """
     if start_chapter == end_chapter:
-        return f"{manhwa_name}__Chapter_{start_chapter:05d}"
+        return f"{manhwa_name}__Chapter_{chapter_num_str(start_chapter)}"
     else:
-        return f"{manhwa_name}__Chapters_{start_chapter:05d}-{end_chapter:05d}"
+        return f"{manhwa_name}__Chapters_{chapter_num_str(start_chapter)}-{chapter_num_str(end_chapter)}"
 
 
 def sanitize_manhwa_name(name: str) -> str:
@@ -356,7 +403,7 @@ def chapter_paths(series: str, chapter: str) -> dict:
     """
     # Parse chapter number from string (e.g., "Chapter_001" -> 1)
     import re
-    match = re.search(r'(\d+)', chapter)
-    chapter_num = int(match.group(1)) if match else 1
+    match = re.search(r'(\d+(?:\.\d+)?)', chapter)
+    chapter_num = normalize_chapter_num(match.group(1)) if match else 1
     
     return get_manhwa_paths(series, chapter_num)

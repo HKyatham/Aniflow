@@ -82,7 +82,7 @@ def get_project(name):
         # Find Chapter_ folders that have actual images (not empty)
         chapter_dirs = []
         for d in all_items:
-            if os.path.isdir(os.path.join(project_root, d)) and d.startswith('Chapter_'):
+            if os.path.isdir(os.path.join(project_root, d)) and config.is_chapter_dir_name(d):
                 chapter_path = os.path.join(project_root, d)
                 # Check if chapter has images
                 has_images = any(
@@ -96,7 +96,7 @@ def get_project(name):
         if len(chapter_dirs) > 1:
             manual_batch_check = True
             manual_chapter_list = sorted([
-                int(d.replace('Chapter_', '')) for d in chapter_dirs
+                config.parse_chapter_num(d) for d in chapter_dirs
             ])
             print(f"[MANUAL BATCH FIX] ✅ Found {len(chapter_dirs)} chapters: {manual_chapter_list}")
         else:
@@ -179,7 +179,7 @@ def switch_chapter():
             # Find Chapter_ folders that have actual images (not empty)
             chapter_dirs = []
             for d in os.listdir(project_root):
-                if os.path.isdir(os.path.join(project_root, d)) and d.startswith('Chapter_'):
+                if os.path.isdir(os.path.join(project_root, d)) and config.is_chapter_dir_name(d):
                     chapter_path = os.path.join(project_root, d)
                     # Check if chapter has images
                     has_images = any(
@@ -192,13 +192,14 @@ def switch_chapter():
             if len(chapter_dirs) > 1:
                 manual_batch_check = True
                 manual_chapter_list = sorted([
-                    int(d.replace('Chapter_', '')) for d in chapter_dirs
+                    config.parse_chapter_num(d) for d in chapter_dirs
                 ])
         
         # Use manual batch detection
         if not manual_batch_check:
             return jsonify({'error': 'Project is not a batch project'}), 400
         
+        chapter_num = config.normalize_chapter_num(chapter_num)
         if chapter_num not in manual_chapter_list:
             return jsonify({'error': f'Chapter {chapter_num} not in chapter list'}), 400
         
@@ -581,14 +582,13 @@ def batch_projects():
         if not os.path.isdir(manhwa_dir):
             continue
         ch_folders = sorted(
-            d for d in os.listdir(manhwa_dir)
-            if d.startswith('Chapter_') and os.path.isdir(os.path.join(manhwa_dir, d))
-        )
+            (d for d in os.listdir(manhwa_dir)
+             if config.is_chapter_dir_name(d) and os.path.isdir(os.path.join(manhwa_dir, d))),
+            key=config.parse_chapter_num)
         chapters = []
         saved_settings = None
         for chf in ch_folders:
             stage, saved_error = _infer_chapter_stage_light(manhwa_dir, chf)
-            num_match = re.search(r'(\d+)', chf)
             images = sum(1 for f in os.listdir(os.path.join(manhwa_dir, chf))
                          if f.lower().endswith(('.jpg', '.jpeg', '.png', '.webp', '.gif', '.bmp', '.img'))) \
                 if os.path.isdir(os.path.join(manhwa_dir, chf)) else 0
@@ -604,7 +604,7 @@ def batch_projects():
                     except Exception:
                         pass
             chapters.append({
-                'chapter': int(num_match.group(1)) if num_match else 0,
+                'chapter': config.parse_chapter_num(chf),
                 'folder': chf,
                 'stage': stage,
                 'error': saved_error,
@@ -1109,7 +1109,7 @@ def update_panel_text(project_name, panel_id):
     # and any cached re-runs see the corrected dialogue
     try:
         txt_path = os.path.join(config.EXTRACTED_TXT_DIR, state.manhwa_name,
-                                f"Chapter_{state.current_chapter:05d}.txt")
+                                f"{config.chapter_folder_name(state.current_chapter)}.txt")
         if os.path.exists(txt_path):
             with open(txt_path, 'r', encoding='utf-8') as f:
                 raw = f.read()
@@ -1144,7 +1144,7 @@ def update_narration(project_name, panel_id):
     # later re-run of Narrate doesn't clobber this manual edit
     try:
         narration_json = os.path.join(config.NARRATION_DIR, state.manhwa_name,
-                                      f"Chapter_{state.current_chapter:05d}", "narration.json")
+                                      config.chapter_folder_name(state.current_chapter), "narration.json")
         if os.path.exists(narration_json):
             with open(narration_json, 'r', encoding='utf-8') as f:
                 cached = json.load(f)
@@ -1492,11 +1492,10 @@ def build_cast_from_manga():
                     continue
                 # Extract chapter number
                 import re
-                num_match = re.search(r'(\d+)', ch_name)
-                if not num_match:
+                ch_num = config.parse_chapter_num(ch_name)
+                if ch_num is None:
                     continue
-                ch_num = int(num_match.group(1))
-                if ch_num < chapter_from or ch_num > chapter_to:
+                if ch_num < float(chapter_from) or ch_num > float(chapter_to):
                     continue
                 ch_dir = os.path.join(manga_path, ch_name)
                 for img_name in sorted(os.listdir(ch_dir)):
@@ -2023,8 +2022,8 @@ def sort_clips():
         
         data = request.json
         output_folder = data.get('output_folder', '').strip()
-        start_chapter = int(data.get('start_chapter', 1))
-        end_chapter = int(data.get('end_chapter', 1))
+        start_chapter = config.normalize_chapter_num(data.get('start_chapter', 1))
+        end_chapter = config.normalize_chapter_num(data.get('end_chapter', 1))
         
         if not output_folder:
             return jsonify({'error': 'Output folder is required'}), 400
@@ -2043,10 +2042,18 @@ def sort_clips():
         all_clips = []
         clip_counter = 1
         
-        for chapter_num in range(start_chapter, end_chapter + 1):
-            # Look for clips matching this chapter number
-            # Format: Chapter_00000, Chapter_00001, etc.
-            chapter_folder_name = f"Chapter_{chapter_num:05d}"
+        # Every chapter folder in range across projects, including side
+        # stories (Chapter_00023.5 sorts between 23 and 24)
+        chapters_in_range = sorted({
+            config.parse_chapter_num(d.name)
+            for project_dir in clips_dir.iterdir() if project_dir.is_dir()
+            for d in project_dir.iterdir()
+            if d.is_dir() and config.is_chapter_dir_name(d.name)
+            and start_chapter <= config.parse_chapter_num(d.name) <= end_chapter
+        }) if clips_dir.is_dir() else []
+
+        for chapter_num in chapters_in_range:
+            chapter_folder_name = config.chapter_folder_name(chapter_num)
             
             found_clips = False
             
@@ -2088,7 +2095,7 @@ def sort_clips():
             return jsonify({
                 'error': f'No clips found for chapters {start_chapter}-{end_chapter}. Make sure you have generated video clips first (step 7-9).',
                 'searched_in': str(clips_dir),
-                'expected_format': f'Chapter_{start_chapter:05d}'
+                'expected_format': config.chapter_folder_name(start_chapter)
             }), 404
         
         return jsonify({

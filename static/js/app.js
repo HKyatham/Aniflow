@@ -117,7 +117,7 @@ function renderBatchDashboard(projects) {
   const cards = projects.map(p => {
     const chips = p.chapters.map(c => {
       const meta = BATCH_STAGE_META[c.stage] || BATCH_STAGE_META.init;
-      return `<span title="Chapter ${String(c.chapter).padStart(5, '0')} — ${c.stage} (${c.images} images)"
+      return `<span title="Chapter ${fmtCh(c.chapter)} — ${c.stage} (${c.images} images)"
                     style="display:inline-block; padding:2px 7px; margin:2px; border-radius:6px; font-size:10px; font-weight:700; color:#0b0d12; background:${meta.color}; opacity:${c.stage === 'init' ? 0.35 : 0.95};">${c.chapter}:${meta.label}</span>`;
     }).join('');
     const ready = p.chapters.filter(c => c.stage === 'clips_done' || c.stage === 'video_done').length;
@@ -615,6 +615,15 @@ async function analyzeUrl() {
   }
 }
 
+// Zero-padded chapter label: 23 -> "00023", 23.5 -> "00023.5" (side story)
+function fmtCh(n) {
+  const num = Number(n);
+  if (!Number.isFinite(num)) return String(n);
+  const whole = Math.trunc(num);
+  const frac = String(num).includes('.') ? '.' + String(num).split('.')[1] : '';
+  return String(whole).padStart(5, '0') + frac;
+}
+
 function renderAnalyzeResult(data) {
   const resultEl = document.getElementById('analyzeResult');
   if (!resultEl) return;
@@ -622,6 +631,21 @@ function renderAnalyzeResult(data) {
   const chapters = data.chapters || [];
   const firstCh = chapters.length > 0 ? chapters[0].number : 1;
   const lastCh = chapters.length > 0 ? chapters[chapters.length - 1].number : 1;
+  const sideStories = chapters.filter(c => c.is_side_story);
+  const sideStoryBox = sideStories.length === 0 ? '' : `
+          <div style="margin-top:10px; padding:10px 12px; background:var(--paper); border:1px solid var(--hairline); border-radius:6px;">
+            <label style="display:flex; gap:8px; align-items:center; font-size:13px; font-weight:600; color:var(--ink); cursor:pointer;">
+              <input type="checkbox" id="chkSkipSideStories">
+              Skip side stories in ranges (${sideStories.length} found)
+            </label>
+            <details style="margin-top:6px;">
+              <summary class="text-xs" style="cursor:pointer; color:var(--text-secondary);">Which chapters are flagged?</summary>
+              <ul class="text-xs" style="margin:6px 0 0 18px; color:var(--text-secondary); line-height:1.6;">
+                ${sideStories.map(c => `<li><b>Ch.${esc(String(c.number))}</b>${c.chapter_title ? ' — ' + esc(c.chapter_title) : ''} <span style="color:var(--text-dim);">(${esc(c.side_story_reason)})</span></li>`).join('')}
+              </ul>
+            </details>
+            <div class="text-xs" style="color:var(--text-dim); margin-top:4px;">Typing a side-story number directly (e.g. <code>23.5</code>) still downloads it.</div>
+          </div>`;
 
   resultEl.innerHTML = `
     <div style="margin-top:12px; padding:20px; background:var(--blue-tint); border:2px solid var(--blue); border-radius:var(--radius-md);">
@@ -658,6 +682,7 @@ function renderAnalyzeResult(data) {
             <br>
             <span style="color:var(--text-dim); font-size:11px;">For batch processing: download multiple chapters and process them all at once.</span>
           </div>
+          ${sideStoryBox}
         </div>
       </div>
 
@@ -674,7 +699,7 @@ function renderAnalyzeResult(data) {
     </div>`;
 }
 
-function parseChapterRange(rangeStr, allChapters) {
+function parseChapterRange(rangeStr, allChapters, skipSideStories = false) {
   const selected = [];
   const parts = rangeStr.split(',').map(s => s.trim());
 
@@ -684,7 +709,8 @@ function parseChapterRange(rangeStr, allChapters) {
       const start = parseFloat(startStr);
       const end = parseFloat(endStr);
       for (const ch of allChapters) {
-        if (ch.number >= start && ch.number <= end) {
+        // Ranges honour the skip toggle; explicitly typed numbers always count
+        if (ch.number >= start && ch.number <= end && !(skipSideStories && ch.is_side_story)) {
           selected.push(ch);
         }
       }
@@ -704,7 +730,8 @@ async function downloadChapters() {
   const rangeStr = document.getElementById('inputChapterRange').value.trim();
   if (!rangeStr) return toast('Enter a chapter number or range', 'error');
 
-  const chapters = parseChapterRange(rangeStr, SCRAPER.mangaInfo.chapters);
+  const skipEl = document.getElementById('chkSkipSideStories');
+  const chapters = parseChapterRange(rangeStr, SCRAPER.mangaInfo.chapters, !!(skipEl && skipEl.checked));
   if (chapters.length === 0) return toast('No matching chapters found in that range', 'error');
 
   const url = document.getElementById('inputMangaUrl').value.trim();
@@ -775,7 +802,7 @@ socket.on('step_complete', function _handleDownload(data) {
           </div>
           ${downloaded.map(d => `
             <div class="text-xs" style="color:var(--text-secondary); margin:4px 0; padding:4px 8px; background:var(--paper-tint); border-radius:4px; font-family:monospace;">
-              📖 Chapter ${String(d.chapter).padStart(5, '0')}: ${d.images} images
+              📖 Chapter ${fmtCh(d.chapter)}: ${d.images} images
               <br><span style="opacity:0.6; font-size:11px;">→ ${esc(d.path)}</span>
             </div>
           `).join('')}
@@ -817,7 +844,7 @@ socket.on('step_complete', function _handleDownload(data) {
           <select id="selectDownloadedChapter" class="form-select" onchange="selectDownloadedChapter(this)" style="font-weight:600;">
             ${downloaded.map((d, i) => `
               <option value="${i}" ${i === 0 ? 'selected' : ''}>
-                📖 Chapter ${String(d.chapter).padStart(5, '0')} (${d.images} images)
+                📖 Chapter ${fmtCh(d.chapter)} (${d.images} images)
               </option>
             `).join('')}
           </select>
@@ -2696,7 +2723,7 @@ async function castScanChapters() {
       .filter(n => Number(n) > 0);
     if (chapters.length === 0 && match && Array.isArray(match.chapter_list)) {
       chapters = match.chapter_list
-        .map(name => { const mnum = String(name).match(/(\d+)/); return mnum ? parseInt(mnum[1], 10) : null; })
+        .map(name => { const mnum = String(name).match(/(\d+(?:\.\d+)?)/); return mnum ? parseFloat(mnum[1]) : null; })
         .filter(n => n !== null && n > 0);
     }
     if (chapters.length === 0) {
@@ -4511,8 +4538,8 @@ function browseFolderForSort() {
 
 function addSortJob() {
   const outputFolder = document.getElementById('sortOutputFolder').value.trim();
-  const startChapter = parseInt(document.getElementById('sortStartChapter').value);
-  const endChapter = parseInt(document.getElementById('sortEndChapter').value);
+  const startChapter = parseFloat(document.getElementById('sortStartChapter').value);
+  const endChapter = parseFloat(document.getElementById('sortEndChapter').value);
   
   if (!outputFolder) {
     toast('Please enter an output folder path', 'warning');
@@ -4552,8 +4579,8 @@ function addSortJob() {
   
   // Clear inputs
   document.getElementById('sortOutputFolder').value = '';
-  document.getElementById('sortStartChapter').value = endChapter + 1;
-  document.getElementById('sortEndChapter').value = endChapter + 5;
+  document.getElementById('sortStartChapter').value = Math.floor(endChapter) + 1;
+  document.getElementById('sortEndChapter').value = Math.floor(endChapter) + 5;
   
   renderSortJobsList();
 }
@@ -4719,7 +4746,7 @@ function renderChapterNavigation() {
       </button>
       <div class="chapter-indicator">
         <strong>${APP.manhwaName}</strong><br>
-        <span>Chapter ${String(displayChapter).padStart(5, '0')}</span>
+        <span>Chapter ${fmtCh(displayChapter)}</span>
         <span style="opacity: 0.6; font-size: 0.9em;"> (${currentIdx + 1}/${APP.chapterList.length})</span>
       </div>
       <button class="btn-chapter-nav" onclick="switchChapter('next')"
@@ -4800,7 +4827,7 @@ async function switchChapter(direction) {
       loadPanelReview();
     }
     
-    toast(`Switched to Chapter ${String(newChapter).padStart(5, '0')}`, 'success');
+    toast(`Switched to Chapter ${fmtCh(newChapter)}`, 'success');
   } catch (error) {
     toast(`Error switching chapter: ${error.message}`, 'error');
   }

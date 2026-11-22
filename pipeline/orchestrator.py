@@ -97,14 +97,18 @@ class PipelineState:
                 # Batch mode: "Chapters_00001-00005"
                 range_str = chapter_part.replace("Chapters_", "")
                 start, end = range_str.split("-")
-                self.start_chapter = int(start)
-                self.end_chapter = int(end)
+                self.start_chapter = config.normalize_chapter_num(start)
+                self.end_chapter = config.normalize_chapter_num(end)
                 self.current_chapter = self.start_chapter
                 self.is_batch = True
-                self.chapter_list = list(range(self.start_chapter, self.end_chapter + 1))
+                # Use the chapters actually on disk in this range so side
+                # stories (23.5) are included; fall back to whole numbers.
+                self.chapter_list = self._chapters_on_disk(
+                    self.manhwa_name, self.start_chapter, self.end_chapter
+                ) or list(range(int(self.start_chapter), int(self.end_chapter) + 1))
             else:
                 # Single chapter: "Chapter_00001"
-                chapter_num = int(chapter_part.replace("Chapter_", ""))
+                chapter_num = config.normalize_chapter_num(chapter_part.replace("Chapter_", ""))
                 self.start_chapter = chapter_num
                 self.end_chapter = chapter_num
                 self.current_chapter = chapter_num
@@ -209,9 +213,8 @@ class PipelineState:
         path = Path(source_folder)
         
         # Look for Chapter_XXXXX pattern in path
-        chapter_match = re.search(r'Chapter_(\d+)', str(path))
-        if chapter_match:
-            detected_chapter = int(chapter_match.group(1))
+        detected_chapter = config.parse_chapter_num(path)
+        if detected_chapter is not None:
             self.current_chapter = detected_chapter
             self.start_chapter = detected_chapter
             self.end_chapter = detected_chapter
@@ -242,16 +245,15 @@ class PipelineState:
                 _IMG_EXTS_SRC = {".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp", ".img"}
                 chapter_folders = sorted([
                     d for d in manhwa_folder.iterdir()
-                    if d.is_dir() and re.match(r'Chapter_\d{5}', d.name)
+                    if d.is_dir() and config.is_chapter_dir_name(d.name)
                     and any(p.suffix.lower() in _IMG_EXTS_SRC for p in d.iterdir() if p.is_file())
-                ])
+                ], key=lambda d: config.parse_chapter_num(d.name))
                 print(f"[PipelineState] Found {len(chapter_folders)} chapter folders in {manhwa_folder}")
                 
                 if len(chapter_folders) > 1:
                     self.is_batch = True
                     self.chapter_list = [
-                        int(re.search(r'Chapter_(\d+)', d.name).group(1))
-                        for d in chapter_folders
+                        config.parse_chapter_num(d.name) for d in chapter_folders
                     ]
                     self.start_chapter = min(self.chapter_list)
                     self.end_chapter = max(self.chapter_list)
@@ -305,8 +307,30 @@ class PipelineState:
         os.makedirs(self.audio_dir, exist_ok=True)
         os.makedirs(self.clips_dir, exist_ok=True)
     
-    def switch_to_chapter(self, chapter_num: int):
+    @staticmethod
+    def _chapters_on_disk(manhwa_name, start=None, end=None):
+        """Sorted chapter numbers (ints and side-story floats like 23.5) that
+        have a download folder with images, optionally limited to [start, end]."""
+        root = os.path.join(config.MANHWA_DOWNLOAD_DIR, manhwa_name)
+        img_exts = ('.jpg', '.jpeg', '.png', '.webp', '.gif', '.bmp', '.img')
+        nums = []
+        try:
+            for d in os.listdir(root):
+                full = os.path.join(root, d)
+                if not (config.is_chapter_dir_name(d) and os.path.isdir(full)):
+                    continue
+                n = config.parse_chapter_num(d)
+                if (start is not None and n < start) or (end is not None and n > end):
+                    continue
+                if any(f.lower().endswith(img_exts) for f in os.listdir(full)):
+                    nums.append(n)
+        except OSError:
+            return []
+        return sorted(nums)
+
+    def switch_to_chapter(self, chapter_num):
         """Switch context to a different chapter in batch processing."""
+        chapter_num = config.normalize_chapter_num(chapter_num)
         if chapter_num not in self.chapter_list:
             raise ValueError(f"Chapter {chapter_num} not in batch range {self.chapter_list}")
 
@@ -417,12 +441,13 @@ class PipelineState:
         def natural_sort_key(s):
             return [int(t) if t.isdigit() else t.lower() for t in _re.split(r'(\d+)', s)]
 
-        ch_tag = f"Chapter_{self.current_chapter:05d}"
+        ch_tag = config.chapter_folder_name(self.current_chapter)
         changed = False
 
         # ── 1. raw_pages: rescan if empty or pointing at another chapter ──
         def _foreign(paths):
-            return any(p and ch_tag not in p for p in paths)
+            # Whole path components: Chapter_00023 must not match Chapter_00023.5
+            return any(p and not config.path_in_chapter(p, self.current_chapter) for p in paths)
 
         if not self.raw_pages or _foreign(self.raw_pages):
             if os.path.isdir(self.download_dir):
@@ -681,12 +706,12 @@ class PipelineState:
                         except OSError:
                             return False
 
-                    ch_dirs = sorted(
+                    ch_dirs = [
                         d for d in os.listdir(root)
-                        if _re.match(r'Chapter_\d{5}$', d) and _has_imgs(os.path.join(root, d))
-                    )
+                        if config.is_chapter_dir_name(d) and _has_imgs(os.path.join(root, d))
+                    ]
                     if ch_dirs:
-                        nums = [int(_re.search(r'(\d+)', d).group(1)) for d in ch_dirs]
+                        nums = sorted(config.parse_chapter_num(d) for d in ch_dirs)
                         state.chapter_list = nums
                         state.is_batch = len(nums) > 1
                         state.start_chapter = min(nums)
@@ -771,7 +796,7 @@ class PipelineState:
         return state
     
     @classmethod
-    def load_chapter(cls, manhwa_name: str, chapter_num: int):
+    def load_chapter(cls, manhwa_name: str, chapter_num):
         """Load a specific chapter directly."""
         project_name = config.get_batch_project_name(manhwa_name, chapter_num, chapter_num)
         state = cls(project_name)
@@ -1083,9 +1108,9 @@ class Orchestrator:
             manhwa_folder = Path(load_dir)
             chapter_folders = sorted([
                 d for d in manhwa_folder.iterdir()
-                if d.is_dir() and re.match(r'Chapter_\d{5}', d.name)
+                if d.is_dir() and config.is_chapter_dir_name(d.name)
                 and any(p.suffix.lower() in _IMG_EXTS for p in d.iterdir() if p.is_file())
-            ])
+            ], key=lambda d: config.parse_chapter_num(d.name))
             
             is_batch_mode = len(chapter_folders) > 1
             # ✅ BATCH FIX: a manhwa root with chapter subfolders (even just one
@@ -1102,8 +1127,7 @@ class Orchestrator:
                 state.manhwa_name = manhwa_folder.name
                 state.is_batch = is_batch_mode
                 state.chapter_list = [
-                    int(re.search(r'Chapter_(\d+)', d.name).group(1))
-                    for d in chapter_folders
+                    config.parse_chapter_num(d.name) for d in chapter_folders
                 ]
                 state.start_chapter = min(state.chapter_list)
                 state.end_chapter = max(state.chapter_list)
@@ -1119,7 +1143,7 @@ class Orchestrator:
                     state.switch_to_chapter(chapter_num)
                     
                     # Load images for this chapter
-                    chapter_dir = manhwa_folder / f"Chapter_{chapter_num:05d}"
+                    chapter_dir = manhwa_folder / config.chapter_folder_name(chapter_num)
                     _IMG_EXTS = {".img", ".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp"}
                     images = sorted(
                         str(p) for p in chapter_dir.iterdir()
@@ -2016,7 +2040,7 @@ class Orchestrator:
 
         # ── SMART RESUME: skip if .txt already exists on disk ──
         txt_dir = os.path.join(config.EXTRACTED_TXT_DIR, state.manhwa_name)
-        txt_path = os.path.join(txt_dir, f"Chapter_{state.current_chapter:05d}.txt")
+        txt_path = os.path.join(txt_dir, f"{config.chapter_folder_name(state.current_chapter)}.txt")
         if self._stage_gte(state, 'text_extracted') and os.path.exists(txt_path):
             # Re-load text into panels_with_text so downstream steps have it
             with open(txt_path, 'r', encoding='utf-8') as f:
@@ -2139,7 +2163,7 @@ class Orchestrator:
             state.save()
             return state
 
-        narration_dir = os.path.join(config.NARRATION_DIR, state.manhwa_name, f"Chapter_{state.current_chapter:05d}")
+        narration_dir = os.path.join(config.NARRATION_DIR, state.manhwa_name, config.chapter_folder_name(state.current_chapter))
         narration_json_path = os.path.join(narration_dir, "narration.json")
 
         # ── SMART RESUME: load narration.json — complete OR PARTIAL ──
@@ -2196,11 +2220,11 @@ class Orchestrator:
                 print(f"[NarrateMapped] Cache load failed: {e} — will re-narrate")
         
         # Load extracted dialogue text
-        narration_dir = os.path.join(config.NARRATION_DIR, state.manhwa_name, f"Chapter_{state.current_chapter:05d}")
+        narration_dir = os.path.join(config.NARRATION_DIR, state.manhwa_name, config.chapter_folder_name(state.current_chapter))
         os.makedirs(narration_dir, exist_ok=True)
 
         txt_dir = os.path.join(config.EXTRACTED_TXT_DIR, state.manhwa_name)
-        txt_path = os.path.join(txt_dir, f"Chapter_{state.current_chapter:05d}.txt")
+        txt_path = os.path.join(txt_dir, f"{config.chapter_folder_name(state.current_chapter)}.txt")
         dialogue_text = ""
         if os.path.exists(txt_path):
             with open(txt_path, 'r', encoding='utf-8') as f:
@@ -2772,7 +2796,7 @@ class Orchestrator:
             # Pre-populate panel dialogue from extracted chapter text
             # so scene_narrator._extract_panel_dialogue() has data to work with
             txt_dir = os.path.join(config.EXTRACTED_TXT_DIR, state.manhwa_name)
-            txt_path = os.path.join(txt_dir, f"Chapter_{state.current_chapter:05d}.txt")
+            txt_path = os.path.join(txt_dir, f"{config.chapter_folder_name(state.current_chapter)}.txt")
             if os.path.exists(txt_path):
                 import re as _re
                 with open(txt_path, 'r', encoding='utf-8') as f:
