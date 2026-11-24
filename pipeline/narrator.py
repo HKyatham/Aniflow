@@ -30,8 +30,8 @@ import config
 from pipeline import llm_transport
 
 # ─── Model constants ──────────────────────────────────────────────
-VISION_MODEL   = "qwen2.5vl:3b"          # Phase 1: vision parser (extracts visual beats)
-WRITER_MODEL   = "qwen2.5vl:3b"          # Legacy: single vision-model narration
+VISION_MODEL   = getattr(config, 'VISION_MODEL', 'qwen2.5vl:3b')  # Phase 1: vision parser (VISION_MODEL env)
+WRITER_MODEL   = getattr(config, 'WRITER_MODEL', 'qwen2.5vl:3b')  # Legacy: single vision-model narration
 TEXT_WRITER    = getattr(config, 'TEXT_WRITER_MODEL', 'gemma3:27b')  # Phase 2: pure-text storyteller
 FALLBACK_MODEL = "qwen2.5vl:7b"
 
@@ -76,7 +76,8 @@ class Narrator:
         """True if the Ollama model name indicates vision capability
         (qwen2.5vl, llama3.2-vision, llava, minicpm-v, ...)."""
         m = (model or '').lower()
-        return any(t in m for t in ('vl', 'vision', 'llava', 'minicpm-v', 'bakllava', 'moondream'))
+        return (any(t in m for t in ('vl', 'vision', 'llava', 'minicpm-v', 'bakllava', 'moondream'))
+                or m == (getattr(config, 'VISION_MODEL', '') or '').lower())
 
     # ─────────────────────────────────────────────────────────────
     # Public API

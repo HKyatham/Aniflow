@@ -39,7 +39,7 @@ def _fast_json(payload: dict) -> dict:
     return payload
 
 # ─── Model constants ──────────────────────────────────────────────
-VISION_MODEL  = "qwen2.5vl:3b"   # The Eyes  – sees the image
+VISION_MODEL  = getattr(config, 'VISION_MODEL', 'qwen2.5vl:3b')   # The Eyes – sees the image (VISION_MODEL env)
 WRITER_MODEL  = "qwen2.5vl:3b"  # kept here for reference (used by narrator)
 FALLBACK_MODEL = "qwen2.5vl:7b"
 
@@ -412,11 +412,17 @@ def _parse_vision_response(raw: str) -> tuple[str, str]:
 # ═══════════════════════════════════════════════════════════════════
 
 def _resolve_vision_model(host: str) -> str:
-    """Pick the best available vision model (qwen2.5vl > llava > any)."""
+    """Pick the vision model: the configured VISION_MODEL if installed,
+    otherwise the best available (qwen2.5vl > llava > any)."""
     try:
         resp = requests.get(f"{host}/api/tags", timeout=5)
         if resp.status_code == 200:
             models = [m['name'] for m in resp.json().get('models', [])]
+            wanted = (getattr(config, 'VISION_MODEL', '') or '').strip()
+            if wanted:
+                for m in models:
+                    if m == wanted or m == f"{wanted}:latest":
+                        return m
             for m in models:
                 if 'qwen' in m.lower() and ('vl' in m.lower() or 'vision' in m.lower()):
                     return m
