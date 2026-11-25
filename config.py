@@ -7,6 +7,35 @@ import re
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
+
+def _load_dotenv(path):
+    """Load KEY=VALUE lines from .env into os.environ (no extra dependency).
+    Real environment variables win over .env, so a value set in the shell
+    still overrides the file. Handles comments, `export KEY=...`, quotes and
+    the UTF-8 BOM Windows Notepad adds."""
+    try:
+        with open(path, encoding='utf-8-sig') as f:
+            lines = f.readlines()
+    except OSError:
+        return
+    for line in lines:
+        line = line.strip()
+        if not line or line.startswith('#') or '=' not in line:
+            continue
+        if line.startswith('export '):
+            line = line[len('export '):]
+        key, _, value = line.partition('=')
+        key, value = key.strip(), value.strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in ('"', "'"):
+            value = value[1:-1]
+        else:
+            value = value.split(' #', 1)[0].strip()  # inline comment
+        if key and key not in os.environ:
+            os.environ[key] = value
+
+
+_load_dotenv(os.path.join(BASE_DIR, '.env'))
+
 # ─── ⚡ Speed Mode (runtime toggle, set from the Source page) ──────
 # When False (default), every pipeline behaves exactly as it always has.
 # When True (user enables "Speed Mode"), the pipeline switches to:

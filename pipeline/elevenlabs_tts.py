@@ -14,7 +14,9 @@ class ElevenLabsTTS:
     """ElevenLabs TTS engine for high-quality voice synthesis."""
 
     def __init__(self):
-        self.api_key = None
+        # From ELEVENLABS_API_KEY (environment or .env); the settings UI can
+        # still replace it at runtime via set_api_key()
+        self.api_key = (getattr(config, 'ELEVENLABS_API_KEY', '') or '').strip() or None
         self.base_url = "https://api.elevenlabs.io/v1"
         self._voices_cache = None
 
