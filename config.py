@@ -181,8 +181,10 @@ KOKORO_SPEED = 1.0
 
 # ElevenLabs TTS settings
 ELEVENLABS_API_KEY = os.getenv("ELEVENLABS_API_KEY", "")  # Set via environment or UI
-ELEVENLABS_MODEL = "eleven_monolingual_v1"  # or "eleven_multilingual_v2"
-ELEVENLABS_VOICE_ID = ""  # Will be set by user in UI
+ELEVENLABS_MODEL = os.getenv("ELEVENLABS_MODEL", "eleven_multilingual_v2")  # or eleven_flash_v2_5 (cheaper/faster)
+# Voice to use when none is chosen in the UI. Copy an ID from your ElevenLabs
+# voice library; setting it also avoids needing the key's "Voices: Read" permission.
+ELEVENLABS_VOICE_ID = os.getenv("ELEVENLABS_VOICE_ID", "")
 ELEVENLABS_STABILITY = 0.5  # 0.0-1.0, lower = more variable
 ELEVENLABS_SIMILARITY = 0.75  # 0.0-1.0, higher = closer to original voice
 

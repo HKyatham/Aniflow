@@ -3,11 +3,27 @@ ElevenLabs TTS Engine - Cloud-based high-quality text-to-speech.
 Requires an ElevenLabs API key.
 """
 import os
+import re
+import time
 import requests
 import json
 import config
 
 ELEVENLABS_AVAILABLE = True  # Available if user provides API key
+
+_ELEVENLABS_ID_RE = re.compile(r'^[A-Za-z0-9]{20}$')
+
+
+def _api_error(resp) -> str:
+    """ElevenLabs' own explanation from an error response, e.g.
+    {"detail": {"status": "missing_permissions", "message": "..."}}."""
+    try:
+        detail = resp.json().get('detail')
+    except ValueError:
+        return (resp.text or '').strip()[:200]
+    if isinstance(detail, dict):
+        return ' — '.join(str(x) for x in (detail.get('status'), detail.get('message')) if x)
+    return str(detail or '')
 
 
 class ElevenLabsTTS:
@@ -19,10 +35,13 @@ class ElevenLabsTTS:
         self.api_key = (getattr(config, 'ELEVENLABS_API_KEY', '') or '').strip() or None
         self.base_url = "https://api.elevenlabs.io/v1"
         self._voices_cache = None
+        self._voices_error = None      # (time, message) of the last failed fetch
 
     def set_api_key(self, api_key: str):
         """Set the ElevenLabs API key."""
         self.api_key = api_key
+        self._voices_cache = None
+        self._voices_error = None
 
     @property
     def available(self) -> bool:
@@ -30,7 +49,7 @@ class ElevenLabsTTS:
         return bool(self.api_key)
 
     def generate_speech(self, text: str, output_path: str,
-                        voice: str = None, model: str = "eleven_monolingual_v1",
+                        voice: str = None, model: str = None,
                         stability: float = 0.5, similarity_boost: float = 0.75) -> dict:
         """
         Generate speech audio using ElevenLabs API.
@@ -49,11 +68,21 @@ class ElevenLabsTTS:
         if not self.api_key:
             raise RuntimeError("ElevenLabs API key not set. Please configure your API key in settings.")
 
+        model = model or getattr(config, 'ELEVENLABS_MODEL', 'eleven_multilingual_v2')
+
+        # A voice name from another engine (e.g. Edge's "en-US-GuyNeural")
+        # isn't an ElevenLabs voice ID — ignore it rather than send it.
+        if voice and not _ELEVENLABS_ID_RE.match(voice):
+            voice = None
+        voice = voice or (getattr(config, 'ELEVENLABS_VOICE_ID', '') or '').strip() or None
         if not voice:
             # Default to first available voice
             voices = self.get_voices()
             if not voices:
-                raise RuntimeError("No ElevenLabs voices available")
+                reason = self._voices_error[1] if self._voices_error else "the voice list is empty"
+                raise RuntimeError(
+                    f"No ElevenLabs voice to use ({reason}). Pick a voice in the app, or set "
+                    f"ELEVENLABS_VOICE_ID in .env to a voice ID from your ElevenLabs library.")
             voice = voices[0]['voice_id']
 
         # ElevenLabs API endpoint
@@ -95,14 +124,16 @@ class ElevenLabsTTS:
             }
 
         except requests.exceptions.HTTPError as e:
-            if e.response.status_code == 401:
-                raise RuntimeError("Invalid ElevenLabs API key")
-            elif e.response.status_code == 403:
-                raise RuntimeError("ElevenLabs API quota exceeded or access denied")
-            elif e.response.status_code == 422:
-                raise RuntimeError(f"Invalid request to ElevenLabs API: {e.response.text}")
+            code = e.response.status_code
+            why = _api_error(e.response)
+            if code == 401:
+                raise RuntimeError(f"ElevenLabs rejected the API key (401): {why or 'invalid key'}")
+            elif code == 403:
+                raise RuntimeError(f"ElevenLabs quota exceeded or access denied (403): {why}")
+            elif code == 422:
+                raise RuntimeError(f"Invalid request to ElevenLabs API (422): {why}")
             else:
-                raise RuntimeError(f"ElevenLabs API error: {e}")
+                raise RuntimeError(f"ElevenLabs API error ({code}): {why or e}")
         except requests.exceptions.Timeout:
             raise RuntimeError("ElevenLabs API request timed out")
         except Exception as e:
@@ -120,13 +151,21 @@ class ElevenLabsTTS:
         # Use cache unless force refresh
         if self._voices_cache is not None and not force_refresh:
             return self._voices_cache
+        # Don't hammer the API (once per panel) after it just refused us
+        if (not force_refresh and self._voices_error
+                and time.monotonic() - self._voices_error[0] < 60):
+            return []
 
         url = f"{self.base_url}/voices"
         headers = {"xi-api-key": self.api_key}
 
         try:
             response = requests.get(url, headers=headers, timeout=10)
-            response.raise_for_status()
+            if response.status_code >= 400:
+                msg = f"{response.status_code} from /v1/voices: {_api_error(response) or response.reason}"
+                self._voices_error = (time.monotonic(), msg)
+                print(f"[ElevenLabs] Error fetching voices: {msg}")
+                return []
             data = response.json()
 
             voices = []
@@ -142,9 +181,11 @@ class ElevenLabsTTS:
                 })
 
             self._voices_cache = voices
+            self._voices_error = None
             return voices
 
         except Exception as e:
+            self._voices_error = (time.monotonic(), str(e))
             print(f"[ElevenLabs] Error fetching voices: {e}")
             return []
 
@@ -179,8 +220,9 @@ class ElevenLabsTTS:
             voices = self.get_voices(force_refresh=True)
             if voices:
                 return True, f"API key valid. {len(voices)} voices available."
-            else:
-                return False, "API key valid but no voices found"
+            if self._voices_error:
+                return False, f"ElevenLabs refused the key: {self._voices_error[1]}"
+            return False, "API key valid but no voices found"
         except Exception as e:
             return False, str(e)
 
