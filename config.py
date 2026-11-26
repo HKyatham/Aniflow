@@ -34,6 +34,8 @@ def _load_dotenv(path):
             os.environ[key] = value
 
 
+# .env.local first so its values win over the shared .env
+_load_dotenv(os.path.join(BASE_DIR, '.env.local'))
 _load_dotenv(os.path.join(BASE_DIR, '.env'))
 
 # ─── ⚡ Speed Mode (runtime toggle, set from the Source page) ──────
@@ -181,7 +183,7 @@ KOKORO_SPEED = 1.0
 
 # ElevenLabs TTS settings
 ELEVENLABS_API_KEY = os.getenv("ELEVENLABS_API_KEY", "")  # Set via environment or UI
-ELEVENLABS_MODEL = os.getenv("ELEVENLABS_MODEL", "eleven_multilingual_v2")  # or eleven_flash_v2_5 (cheaper/faster)
+ELEVENLABS_MODEL = os.getenv("ELEVENLABS_MODEL", "eleven_v4")  # supports audio tags like [whisper]
 # Voice to use when none is chosen in the UI. Copy an ID from your ElevenLabs
 # voice library; setting it also avoids needing the key's "Voices: Read" permission.
 ELEVENLABS_VOICE_ID = os.getenv("ELEVENLABS_VOICE_ID", "")

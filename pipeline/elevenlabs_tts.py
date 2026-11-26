@@ -1,193 +1,201 @@
 """
 ElevenLabs TTS Engine - Cloud-based high-quality text-to-speech.
-Requires an ElevenLabs API key.
+
+Uses the official ElevenLabs Python SDK (`pip install elevenlabs`):
+
+    client = ElevenLabs(api_key=...)
+    audio = client.text_to_speech.convert(voice_id=..., text=..., model_id=...)
+
+Configuration (environment, .env or .env.local):
+    ELEVENLABS_API_KEY   required
+    ELEVENLABS_VOICE_ID  voice used when none is picked in the app
+    ELEVENLABS_MODEL     default "eleven_v4" (supports audio tags such as
+                         "[whisper]" or "[building tension]" in the text)
 """
 import os
 import re
 import time
-import requests
-import json
+
 import config
 
-ELEVENLABS_AVAILABLE = True  # Available if user provides API key
+try:
+    from elevenlabs import VoiceSettings
+    from elevenlabs.client import ElevenLabs
+    from elevenlabs.core.api_error import ApiError
+    ELEVENLABS_AVAILABLE = True
+except ImportError:  # SDK not installed — engine reports itself unavailable
+    ElevenLabs = VoiceSettings = None
 
+    class ApiError(Exception):
+        status_code = None
+        body = None
+
+    ELEVENLABS_AVAILABLE = False
+
+# ElevenLabs voice IDs are 20 alphanumeric characters (e.g. kLhAstPcnnPxqzk6gS5i)
 _ELEVENLABS_ID_RE = re.compile(r'^[A-Za-z0-9]{20}$')
 
 
-def _api_error(resp) -> str:
-    """ElevenLabs' own explanation from an error response, e.g.
-    {"detail": {"status": "missing_permissions", "message": "..."}}."""
-    try:
-        detail = resp.json().get('detail')
-    except ValueError:
-        return (resp.text or '').strip()[:200]
+def _api_error_detail(e) -> str:
+    """ElevenLabs' own explanation, e.g. "missing_permissions — The API key
+    you used is missing the permission voices_read ..." """
+    body = getattr(e, 'body', None)
+    detail = body.get('detail', body) if isinstance(body, dict) else body
     if isinstance(detail, dict):
         return ' — '.join(str(x) for x in (detail.get('status'), detail.get('message')) if x)
-    return str(detail or '')
+    return str(detail or e)
 
 
 class ElevenLabsTTS:
     """ElevenLabs TTS engine for high-quality voice synthesis."""
 
     def __init__(self):
+        self._client = None
+        self._voices_cache = None
+        self._voices_error = None  # (time, message) of the last failed voice fetch
+        self.api_key = None
         # From ELEVENLABS_API_KEY (environment or .env); the settings UI can
         # still replace it at runtime via set_api_key()
-        self.api_key = (getattr(config, 'ELEVENLABS_API_KEY', '') or '').strip() or None
-        self.base_url = "https://api.elevenlabs.io/v1"
-        self._voices_cache = None
-        self._voices_error = None      # (time, message) of the last failed fetch
+        self.set_api_key((getattr(config, 'ELEVENLABS_API_KEY', '') or '').strip() or None)
 
     def set_api_key(self, api_key: str):
-        """Set the ElevenLabs API key."""
-        self.api_key = api_key
+        """Set the ElevenLabs API key (and rebuild the SDK client)."""
+        self.api_key = (api_key or '').strip() or None
+        self._client = (ElevenLabs(api_key=self.api_key)
+                        if (self.api_key and ELEVENLABS_AVAILABLE) else None)
         self._voices_cache = None
         self._voices_error = None
 
     @property
     def available(self) -> bool:
-        """Check if ElevenLabs is available (has API key)."""
-        return bool(self.api_key)
+        """True when the SDK is installed and an API key is set."""
+        return self._client is not None
 
-    def generate_speech(self, text: str, output_path: str,
-                        voice: str = None, model: str = None,
-                        stability: float = 0.5, similarity_boost: float = 0.75) -> dict:
-        """
-        Generate speech audio using ElevenLabs API.
+    def _require_client(self):
+        if not ELEVENLABS_AVAILABLE:
+            raise RuntimeError("The ElevenLabs SDK is not installed. Run: pip install elevenlabs")
+        if self._client is None:
+            raise RuntimeError("ElevenLabs API key not set. Add ELEVENLABS_API_KEY to .env "
+                               "or enter it in settings.")
+        return self._client
 
-        Args:
-            text: Text to synthesize
-            output_path: Path to save the audio file
-            voice: ElevenLabs voice ID
-            model: Model ID (eleven_monolingual_v1, eleven_multilingual_v2, etc.)
-            stability: Stability setting (0.0-1.0)
-            similarity_boost: Clarity setting (0.0-1.0)
-
-        Returns:
-            dict with audio_path, duration
-        """
-        if not self.api_key:
-            raise RuntimeError("ElevenLabs API key not set. Please configure your API key in settings.")
-
-        model = model or getattr(config, 'ELEVENLABS_MODEL', 'eleven_multilingual_v2')
-
+    def _pick_voice(self, voice: str = None) -> str:
         # A voice name from another engine (e.g. Edge's "en-US-GuyNeural")
         # isn't an ElevenLabs voice ID — ignore it rather than send it.
         if voice and not _ELEVENLABS_ID_RE.match(voice):
             voice = None
         voice = voice or (getattr(config, 'ELEVENLABS_VOICE_ID', '') or '').strip() or None
-        if not voice:
-            # Default to first available voice
-            voices = self.get_voices()
-            if not voices:
-                reason = self._voices_error[1] if self._voices_error else "the voice list is empty"
-                raise RuntimeError(
-                    f"No ElevenLabs voice to use ({reason}). Pick a voice in the app, or set "
-                    f"ELEVENLABS_VOICE_ID in .env to a voice ID from your ElevenLabs library.")
-            voice = voices[0]['voice_id']
+        if voice:
+            return voice
+        voices = self.get_voices()
+        if voices:
+            return voices[0]['voice_id']
+        reason = self._voices_error[1] if self._voices_error else "the voice list is empty"
+        raise RuntimeError(
+            f"No ElevenLabs voice to use ({reason}). Pick a voice in the app, or set "
+            f"ELEVENLABS_VOICE_ID in .env to a voice ID from your ElevenLabs library.")
 
-        # ElevenLabs API endpoint
-        url = f"{self.base_url}/text-to-speech/{voice}"
+    def generate_speech(self, text: str, output_path: str,
+                        voice: str = None, model: str = None,
+                        stability: float = None, similarity_boost: float = None) -> dict:
+        """
+        Generate speech audio and save it as MP3.
 
-        headers = {
-            "Accept": "audio/mpeg",
-            "Content-Type": "application/json",
-            "xi-api-key": self.api_key
-        }
+        Args:
+            text: Text to synthesize (may include audio tags like "[whisper]"
+                  with models that support them, e.g. eleven_v4)
+            output_path: Where to save; the extension is forced to .mp3
+            voice: ElevenLabs voice ID (falls back to ELEVENLABS_VOICE_ID)
+            model: Model ID (falls back to ELEVENLABS_MODEL)
+            stability / similarity_boost: optional voice settings; omitted by
+                  default so the voice's own saved settings apply
 
-        data = {
-            "text": text,
-            "model_id": model,
-            "voice_settings": {
-                "stability": stability,
-                "similarity_boost": similarity_boost
-            }
-        }
+        Returns:
+            dict with audio_path, duration
+        """
+        client = self._require_client()
+        voice_id = self._pick_voice(voice)
+        model_id = model or getattr(config, 'ELEVENLABS_MODEL', 'eleven_v4')
+
+        kwargs = {'voice_id': voice_id, 'text': text, 'model_id': model_id,
+                  'output_format': 'mp3_44100_128'}
+        if stability is not None or similarity_boost is not None:
+            kwargs['voice_settings'] = VoiceSettings(stability=stability,
+                                                     similarity_boost=similarity_boost)
 
         try:
-            response = requests.post(url, json=data, headers=headers, timeout=60)
-            response.raise_for_status()
-
-            # Ensure output directory exists
-            os.makedirs(os.path.dirname(output_path), exist_ok=True)
-
-            # Save audio
-            mp3_path = output_path.rsplit('.', 1)[0] + '.mp3'
-            with open(mp3_path, 'wb') as f:
-                f.write(response.content)
-
-            # Get duration
-            duration = self._get_audio_duration(mp3_path)
-
-            return {
-                "audio_path": mp3_path,
-                "duration": duration,
-            }
-
-        except requests.exceptions.HTTPError as e:
-            code = e.response.status_code
-            why = _api_error(e.response)
+            audio = b"".join(client.text_to_speech.convert(**kwargs))
+        except ApiError as e:
+            code, why = e.status_code, _api_error_detail(e)
             if code == 401:
-                raise RuntimeError(f"ElevenLabs rejected the API key (401): {why or 'invalid key'}")
-            elif code == 403:
+                raise RuntimeError(f"ElevenLabs rejected the API key (401): {why}")
+            if code == 403:
                 raise RuntimeError(f"ElevenLabs quota exceeded or access denied (403): {why}")
-            elif code == 422:
-                raise RuntimeError(f"Invalid request to ElevenLabs API (422): {why}")
-            else:
-                raise RuntimeError(f"ElevenLabs API error ({code}): {why or e}")
-        except requests.exceptions.Timeout:
-            raise RuntimeError("ElevenLabs API request timed out")
+            if code == 404:
+                raise RuntimeError(f"ElevenLabs voice or model not found (404, voice={voice_id}, "
+                                   f"model={model_id}): {why}")
+            if code == 422:
+                raise RuntimeError(f"Invalid request to ElevenLabs (422): {why}")
+            raise RuntimeError(f"ElevenLabs API error ({code}): {why}")
         except Exception as e:
             raise RuntimeError(f"ElevenLabs TTS error: {e}")
 
+        if not audio:
+            raise RuntimeError("ElevenLabs returned empty audio")
+
+        mp3_path = os.path.splitext(output_path)[0] + '.mp3'
+        os.makedirs(os.path.dirname(mp3_path) or '.', exist_ok=True)
+        with open(mp3_path, 'wb') as f:
+            f.write(audio)
+
+        return {
+            "audio_path": mp3_path,
+            "duration": self._get_audio_duration(mp3_path),
+        }
+
     def get_voices(self, force_refresh: bool = False) -> list[dict]:
         """
-        Get available ElevenLabs voices.
-        
-        Returns list of voice dicts with: voice_id, name, preview_url, labels, etc.
-        """
-        if not self.api_key:
-            return []
+        Get the voices in the account's ElevenLabs library.
 
-        # Use cache unless force refresh
+        Returns list of voice dicts with: voice_id, name, preview_url, labels, etc.
+        Needs the API key's "Voices: Read" permission.
+        """
+        if not self.available:
+            return []
         if self._voices_cache is not None and not force_refresh:
             return self._voices_cache
-        # Don't hammer the API (once per panel) after it just refused us
+        # Don't hammer the API (once per panel) right after it refused us
         if (not force_refresh and self._voices_error
                 and time.monotonic() - self._voices_error[0] < 60):
             return []
 
-        url = f"{self.base_url}/voices"
-        headers = {"xi-api-key": self.api_key}
-
         try:
-            response = requests.get(url, headers=headers, timeout=10)
-            if response.status_code >= 400:
-                msg = f"{response.status_code} from /v1/voices: {_api_error(response) or response.reason}"
-                self._voices_error = (time.monotonic(), msg)
-                print(f"[ElevenLabs] Error fetching voices: {msg}")
-                return []
-            data = response.json()
-
-            voices = []
-            for v in data.get('voices', []):
-                voices.append({
-                    "voice_id": v['voice_id'],
-                    "name": v['name'],
-                    "preview_url": v.get('preview_url'),
-                    "category": v.get('category', 'generated'),
-                    "labels": v.get('labels', {}),
-                    "description": v.get('description', ''),
-                    "engine": "elevenlabs",
-                })
-
+            voices, token = [], None
+            while True:
+                resp = self._client.voices.search(page_size=100, next_page_token=token)
+                for v in resp.voices or []:
+                    voices.append({
+                        "voice_id": v.voice_id,
+                        "name": v.name,
+                        "preview_url": getattr(v, 'preview_url', None),
+                        "category": getattr(v, 'category', None) or 'generated',
+                        "labels": getattr(v, 'labels', None) or {},
+                        "description": getattr(v, 'description', None) or '',
+                        "engine": "elevenlabs",
+                    })
+                token = getattr(resp, 'next_page_token', None)
+                if not getattr(resp, 'has_more', False) or not token:
+                    break
             self._voices_cache = voices
             self._voices_error = None
             return voices
-
+        except ApiError as e:
+            msg = f"{e.status_code} from voice list: {_api_error_detail(e)}"
         except Exception as e:
-            self._voices_error = (time.monotonic(), str(e))
-            print(f"[ElevenLabs] Error fetching voices: {e}")
-            return []
+            msg = str(e)
+        self._voices_error = (time.monotonic(), msg)
+        print(f"[ElevenLabs] Error fetching voices: {msg}")
+        return []
 
     def _get_audio_duration(self, audio_path: str) -> float:
         """Get audio duration in seconds."""
@@ -198,33 +206,33 @@ class ElevenLabsTTS:
             clip.close()
             return duration
         except Exception:
-            # Fallback: estimate from file size (rough approximation)
+            # Fallback: estimate from file size (MP3 at 128kbps ≈ 16KB/s)
             try:
-                size = os.path.getsize(audio_path)
-                # MP3 at ~128kbps: 1 second ≈ 16KB
-                return max(1.0, size / 16000)
+                return max(1.0, os.path.getsize(audio_path) / 16000)
             except Exception:
                 return 2.0
 
     def test_api_key(self) -> tuple[bool, str]:
         """
-        Test if the API key is valid.
-        
+        Test if the API key works.
+
         Returns:
             (success: bool, message: str)
         """
+        if not ELEVENLABS_AVAILABLE:
+            return False, "The ElevenLabs SDK is not installed. Run: pip install elevenlabs"
         if not self.api_key:
             return False, "No API key provided"
 
-        try:
-            voices = self.get_voices(force_refresh=True)
-            if voices:
-                return True, f"API key valid. {len(voices)} voices available."
-            if self._voices_error:
-                return False, f"ElevenLabs refused the key: {self._voices_error[1]}"
-            return False, "API key valid but no voices found"
-        except Exception as e:
-            return False, str(e)
+        voices = self.get_voices(force_refresh=True)
+        if voices:
+            return True, f"API key valid. {len(voices)} voices available."
+        if self._voices_error:
+            if getattr(config, 'ELEVENLABS_VOICE_ID', '') and 'voices_read' in self._voices_error[1]:
+                return True, ("API key is set but can't list voices (missing the Voices: Read "
+                              "permission), so ELEVENLABS_VOICE_ID will be used for speech.")
+            return False, f"ElevenLabs refused the key: {self._voices_error[1]}"
+        return False, "API key valid but no voices found"
 
 
 # Singleton

@@ -67,4 +67,6 @@ yt tutorial/
 
 # ─── Secrets ─────────────────────────────────────────
 .env
+.env.local
+.env.*.local
 SECURITY_AUDIT.txt
