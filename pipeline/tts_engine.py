@@ -79,11 +79,11 @@ def generate_speech(text, output_path, voice=None, rate=None, pitch=None, engine
     engine = engine or config.TTS_ENGINE
     if engine == "kokoro" and KOKORO_AVAILABLE:
         return get_kokoro_tts().generate_speech(text, output_path, voice=voice, speed=speed)
-    elif engine == "elevenlabs" and ELEVENLABS_AVAILABLE:
-        elevenlabs = get_elevenlabs_tts()
-        if not elevenlabs.available:
-            raise RuntimeError("ElevenLabs API key not configured. Please set your API key in settings.")
-        return elevenlabs.generate_speech(text, output_path, voice=voice)
+    elif engine == "elevenlabs":
+        # Always go through ElevenLabs when it's selected: it raises the real
+        # reason (SDK not installed / no key / bad key / no voice) instead of
+        # silently falling back to Edge or blaming a missing key.
+        return get_elevenlabs_tts().generate_speech(text, output_path, voice=voice)
     return asyncio.run(_generate_speech_edge(text, output_path, voice, rate, pitch))
 
 def generate_all_audio(panels, state, voice=None, rate=None, pitch=None, engine=None, speed=1.0,

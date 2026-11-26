@@ -2445,6 +2445,12 @@ def handle_disconnect():
     pass
 
 if __name__ == '__main__':
+    try:
+        _el = get_elevenlabs_tts().status()
+        print(f"[ElevenLabs] sdk={'yes' if _el['sdk_installed'] else 'NOT INSTALLED'} "
+              f"key={_el['api_key']} voice={_el['voice_id']} model={_el['model']}")
+    except Exception as _e:
+        print(f"[ElevenLabs] status check failed: {_e}")
     print("\n" + "="*60)
     print("  🎬 AniFlow - Automated Manhwa Video Creation")
     print("  Open http://localhost:8080 in your browser")

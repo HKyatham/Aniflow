@@ -235,6 +235,19 @@ class ElevenLabsTTS:
         return False, "API key valid but no voices found"
 
 
+    def status(self) -> dict:
+        """What the app currently sees — for logs and troubleshooting.
+        Never includes the full key."""
+        key = self.api_key or ''
+        return {
+            'sdk_installed': ELEVENLABS_AVAILABLE,
+            'api_key': f"set (…{key[-4:]})" if key else "NOT SET",
+            'voice_id': (getattr(config, 'ELEVENLABS_VOICE_ID', '') or '').strip() or "not set",
+            'model': getattr(config, 'ELEVENLABS_MODEL', 'eleven_v4'),
+            'ready': self.available,
+        }
+
+
 # Singleton
 _elevenlabs_tts = None
 
@@ -245,3 +258,42 @@ def get_elevenlabs_tts() -> ElevenLabsTTS:
     if _elevenlabs_tts is None:
         _elevenlabs_tts = ElevenLabsTTS()
     return _elevenlabs_tts
+
+
+def _self_test():
+    """python -m pipeline.elevenlabs_tts — check the setup end to end:
+    shows what the app sees, lists voices with their IDs, writes a test MP3."""
+    import tempfile
+    tts = get_elevenlabs_tts()
+    print("ElevenLabs setup as the app sees it:")
+    for k, v in tts.status().items():
+        print(f"  {k:14} {v}")
+    if not ELEVENLABS_AVAILABLE:
+        print("\n✗ Install the SDK in the same Python environment the app uses:  pip install elevenlabs")
+        return
+    if not tts.api_key:
+        print(f"\n✗ No key found. Put ELEVENLABS_API_KEY=... in {os.path.join(config.BASE_DIR, '.env')}"
+              f" (check it isn't saved as .env.txt), or set it in this terminal.")
+        return
+
+    print("\nVoices in your account:")
+    voices = tts.get_voices(force_refresh=True)
+    for v in voices[:25]:
+        print(f"  {v['voice_id']}  {v['name']}  ({v['category']})")
+    if not voices:
+        print(f"  (none listed — {tts._voices_error[1] if tts._voices_error else 'empty library'})")
+
+    out = os.path.join(tempfile.gettempdir(), "aniflow_elevenlabs_test.mp3")
+    print("\nGenerating a test clip…")
+    try:
+        r = tts.generate_speech("[building tension] Nobody wanted to. [whisper] But everybody knew.", out)
+        print(f"✓ Saved {r['audio_path']} ({r['duration']:.1f}s) — ElevenLabs works.")
+        if not (getattr(config, 'ELEVENLABS_VOICE_ID', '') or '').strip() and voices:
+            print(f"  Used the first voice ({voices[0]['name']}). To pick one, add to .env:\n"
+                  f"  ELEVENLABS_VOICE_ID={voices[0]['voice_id']}")
+    except RuntimeError as e:
+        print(f"✗ {e}")
+
+
+if __name__ == "__main__":
+    _self_test()
